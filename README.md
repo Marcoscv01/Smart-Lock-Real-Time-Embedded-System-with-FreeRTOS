@@ -1,13 +1,15 @@
 # Cerrojo automático
 Se hará el comportamiento lógico de un teclado matricial para poner la contraseña de un cerrojo automático. 
-ada intento quedará registrado con hora y fecha. Además, se podrá abrir también haciendo uso de un RFID.
+Cada intento quedará registrado con hora y fecha. Además, se podrá abrir también haciendo uso de un RFID.
+
+El botón de panico funciona con un ISR que activa un evento en la tarea de la maquina de estados, dejando abierto el cerrojo hasta una nueva ISR del mismo botón.
 
 ## Entradas/Salidas
 Teclado matriial: Filas : 13, 12, 14, 27; Columnas: 26, 25, 33, 32
 Servo Cerradura: GPIO15, con apertura en 2000 y cierre en 1000
+Boton Panico: GPIO0, el BOOT del ESP, simulando una emergencia que necesite tener la apertura de la cerradura forzada
 
-
-# Teclado.h
+## Teclado.h
 Implementa la lectura de un teclado matricial 4×4 mediante escaneo periódico de filas y columnas usando GPIO.
 Las filas se configuran como salidas y las columnas como entradas con pull-up. La detección de pulsaciones se realiza por nivel bajo, con debounce simple por retardo. Cada tecla detectada se envía a una cola FreeRTOS (cola_teclas).
 
@@ -15,7 +17,7 @@ Las teclas * y # son especiales:
 *:Borrará el último dígito
 #:Confirmación de la contraseña a mandar
 
-# FSM
+## FSM
 La maquina de estados funciona de la siguiente manera:
       +---------+
       | ST_INIT | <--- EVT_STARTUP
@@ -56,7 +58,7 @@ La maquina de estados funciona de la siguiente manera:
       |  ST_IDLE |
       +---------+
 
-# Orden prioridades tareas
+## Orden prioridades tareas
 - tarea_teclado -->	6 (Escanea el hardware y genera eventos; si se retrasa mucho, podrías perder pulsaciones. Debe ser la más rápida)
 - teclado_event_task -->5 (Toma las teclas de la cola y las convierte en eventos FSM. Necesita ser rápida para no bloquear la cola de teclas)
-- fsm_task -->4	(Procesa la lógica de control. Puede esperar un poco si hay picos de entradas, porque los eventos se encolan en q_events)
+- fsm_task -->4 (Procesa la lógica de control. Puede esperar un poco si hay picos de entradas, porque los eventos se encolan en q_events)
