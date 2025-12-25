@@ -1,3 +1,3 @@
 idf_component_register(SRCS "main.c"
-                       PRIV_REQUIRES driver
+                       PRIV_REQUIRES driver esp_timer
                        INCLUDE_DIRS "")

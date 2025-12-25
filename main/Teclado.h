@@ -27,6 +27,10 @@ extern QueueHandle_t cola_teclas;
 // Inicialización del teclado
 static inline void teclado_init(void)
 {
+    cola_teclas = xQueueCreate(10, sizeof(char));
+    configASSERT(cola_teclas);
+
+
     gpio_config_t io_conf = {0};
 
     // Configurar filas como salida
