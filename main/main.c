@@ -1,32 +1,50 @@
 #include "Teclado.h"
+#include "lcd.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
+
+#include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/i2c.h"
+
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <string.h>
 
-/* ============================ Configuración ============================ */
+/* ============================ CONFIG ============================ */
 
 #define PIN_LENGTH       4
-static const char *TAG = "fsm_acceso";
 static const char PIN_CORRECTO[PIN_LENGTH + 1] = "1234";
 
-#define SERVO_GPIO GPIO_NUM_15
+/* ---- Servo ---- */
+#define SERVO_GPIO       GPIO_NUM_15
 #define SERVO_OPEN_US    2000
 #define SERVO_CLOSE_US   1000
 #define SERVO_TIME_MS    3000
 
+/* ---- Panic ---- */
+#define PANIC_GPIO       GPIO_NUM_0
+
+/* ---- RTOS ---- */
 #define FSM_QUEUE_LEN    10
-#define FSM_TASK_STACK   4096
 
-#define FSM_TASK_PRIO    5
-#define Teclado_Event_TASK_PRIO    4
-#define Teclado_TASK_PRIO    6
+#define FSM_TASK_PRIO            5
+#define TECLADO_EVENT_TASK_PRIO  4
+#define TECLADO_TASK_PRIO        6
+#define PANIC_TASK_PRIO          7
+#define LCD_TASK_PRIO            3
 
-#define PANIC_GPIO GPIO_NUM_0
+/* ---- I2C ---- */
+#define I2C_MASTER_NUM     I2C_NUM_0
+#define I2C_SDA            19
+#define I2C_SCL            18
+#define I2C_FREQ_HZ        100000
+
+#define DS3231_ADDR        0x68
 
 /* ============================ FSM ============================ */
 
@@ -46,8 +64,7 @@ typedef enum {
     EVT_TECLA_BORRAR,
     EVT_TECLA_CONFIRMAR,
     EVT_TIMEOUT,
-    EVT_PANIC_ISR
-
+    EVT_PANIC
 } event_id_t;
 
 typedef struct {
@@ -56,33 +73,88 @@ typedef struct {
     int64_t timestamp_us;
 } event_t;
 
-/* ============================ Recursos globales ============================ */
+/* ============================ RECURSOS ============================ */
 
 QueueHandle_t cola_teclas;
 static QueueHandle_t q_events;
 static TimerHandle_t t_servo;
+static SemaphoreHandle_t sem_panic;
+static SemaphoreHandle_t mutex_i2c;
+static SemaphoreHandle_t mutex_lcd;
+
 static fsm_state_t state;
 
-/* ============================ Servo ============================ */
+/* ============================ LCD ============================ */
+
+static char lcd_line1[17] = "Arrancando...";
+static char lcd_line2[17] = "                ";
+
+static void lcd_set_line1(const char *txt)
+{
+    xSemaphoreTake(mutex_lcd, portMAX_DELAY);
+    snprintf(lcd_line1, 17, "%-16s", txt);
+    xSemaphoreGive(mutex_lcd);
+}
+
+/* ============================ I2C / RTC ============================ */
+
+static uint8_t bcd_to_dec(uint8_t v)
+{
+    return (v >> 4) * 10 + (v & 0x0F);
+}
+
+static void i2c_init(void)
+{
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA,
+        .scl_io_num = I2C_SCL,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_FREQ_HZ
+    };
+    i2c_param_config(I2C_MASTER_NUM, &conf);
+    i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
+}
+
+static void ds3231_read(uint8_t *h, uint8_t *m, uint8_t *s,
+                        uint8_t *d, uint8_t *mo)
+{
+    uint8_t reg = 0x00, data[5];
+
+    xSemaphoreTake(mutex_i2c, portMAX_DELAY);
+    i2c_master_write_read_device(
+        I2C_MASTER_NUM, DS3231_ADDR,
+        &reg, 1, data, 5, pdMS_TO_TICKS(100)
+    );
+    xSemaphoreGive(mutex_i2c);
+
+    *s  = bcd_to_dec(data[0]);
+    *m  = bcd_to_dec(data[1]);
+    *h  = bcd_to_dec(data[2] & 0x3F);
+    *d  = bcd_to_dec(data[3]);
+    *mo = bcd_to_dec(data[4]);
+}
+
+/* ============================ SERVO ============================ */
 
 static void servo_init(void)
 {
-    ledc_timer_config_t timer = {
+    ledc_timer_config_t t = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .timer_num = LEDC_TIMER_0,
         .duty_resolution = LEDC_TIMER_16_BIT,
         .freq_hz = 50
     };
-    ledc_timer_config(&timer);
+    ledc_timer_config(&t);
 
-    ledc_channel_config_t channel = {
+    ledc_channel_config_t c = {
         .gpio_num = SERVO_GPIO,
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .channel = LEDC_CHANNEL_0,
-        .timer_sel = LEDC_TIMER_0,
-        .duty = 0
+        .timer_sel = LEDC_TIMER_0
     };
-    ledc_channel_config(&channel);
+    ledc_channel_config(&c);
 }
 
 static void servo_set_us(uint32_t us)
@@ -92,232 +164,213 @@ static void servo_set_us(uint32_t us)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
-/* ============================ Eventos FSM ============================ */
+/* ============================ FSM ============================ */
 
-static inline void fsm_post_event(event_t *e)
+static void fsm_post_event(event_t *e)
 {
     e->timestamp_us = esp_timer_get_time();
     xQueueSend(q_events, e, 0);
 }
 
-static inline void fsm_post_event_isr(event_t *e)
-{
-    BaseType_t hpw = pdFALSE;
-    e->timestamp_us = esp_timer_get_time();
-    xQueueSendFromISR(q_events, e, &hpw);
-    if (hpw == pdTRUE)
-        portYIELD_FROM_ISR();
-}
-
-/* ============================ Timer Servo ============================ */
-
 static void servo_timeout_cb(TimerHandle_t xTimer)
 {
-    event_t e = {.id = EVT_TIMEOUT};
-    fsm_post_event(&e);
+    fsm_post_event(&(event_t){.id = EVT_TIMEOUT});
 }
-
-/* ============================ FSM Task ============================ */
 
 static void fsm_task(void *arg)
 {
-    char pin_buffer[PIN_LENGTH + 1] = {0};
-    uint8_t pin_index = 0;
+    char pin[PIN_LENGTH + 1] = {0};
+    uint8_t idx = 0;
 
     state = ST_INIT;
-    ESP_LOGI(TAG, "FSM en ST_INIT");
 
     for (;;)
     {
         event_t e;
-        if (xQueueReceive(q_events, &e, portMAX_DELAY) != pdTRUE)
-            continue;
+        xQueueReceive(q_events, &e, portMAX_DELAY);
 
-        // ==== Manejo de pánico toggle ====
-        if (e.id == EVT_PANIC_ISR)
+        if (e.id == EVT_PANIC)
         {
             if (state != ST_ERROR)
             {
-                ESP_LOGE(TAG, "[PANIC] Activado");
+                lcd_set_line1("!!! PANIC !!!");
                 servo_set_us(SERVO_OPEN_US);
                 state = ST_ERROR;
             }
             else
             {
-                ESP_LOGI(TAG, "[PANIC] Desactivado");
                 servo_set_us(SERVO_CLOSE_US);
                 state = ST_IDLE;
-                event_t back = {.id = EVT_ENTER_IDLE};
-                fsm_post_event(&back);
+                fsm_post_event(&(event_t){.id = EVT_ENTER_IDLE});
             }
             continue;
         }
 
-        // ==== FSM según estado ====
         switch (state)
         {
-            case ST_INIT:
-                if (e.id == EVT_STARTUP)
-                {
-                    servo_set_us(SERVO_CLOSE_US);
-                    ESP_LOGI(TAG, "[INIT] -> IDLE");
-                    state = ST_IDLE;
-
-                    event_t next = {.id = EVT_ENTER_IDLE};
-                    fsm_post_event(&next);
-                }
-                break;
-
-            case ST_IDLE:
-                if (e.id == EVT_ENTER_IDLE)
-                {
-                    memset(pin_buffer, 0, sizeof(pin_buffer));
-                    pin_index = 0;
-                    ESP_LOGI(TAG, "[IDLE] Introducir PIN");
-                    state = ST_ENTRADA_PIN;
-                }
-                break;
-
-            case ST_ENTRADA_PIN:
-                if (e.id == EVT_TECLA_DIGITO && pin_index < PIN_LENGTH)
-                {
-                    pin_buffer[pin_index++] = e.tecla;
-                    pin_buffer[pin_index] = '\0';
-                    ESP_LOGI(TAG, "[PIN] %s", pin_buffer);
-                }
-                else if (e.id == EVT_TECLA_BORRAR && pin_index > 0)
-                {
-                    pin_index--;
-                    pin_buffer[pin_index] = '\0';
-                    ESP_LOGI(TAG, "[PIN] %s", pin_buffer);
-                }
-                else if (e.id == EVT_TECLA_CONFIRMAR)
-                {
-                    ESP_LOGI(TAG, "[VALIDANDO] %s", pin_buffer);
-
-                    if (strcmp(pin_buffer, PIN_CORRECTO) == 0)
-                    {
-                        ESP_LOGI(TAG, "[ABIERTO] Acceso concedido");
-                        servo_set_us(SERVO_OPEN_US);
-                        xTimerStart(t_servo, 0);
-                        state = ST_ABIERTO;
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "[ERROR] Acceso denegado");
-                        xTimerStart(t_servo, 0);
-                        state = ST_ERROR;
-                    }
-
-                    memset(pin_buffer, 0, sizeof(pin_buffer));
-                    pin_index = 0;
-                }
-                break;
-
-            case ST_ABIERTO:
-                if (e.id == EVT_TIMEOUT)
-                {
-                    ESP_LOGI(TAG, "[ABIERTO] Cerrando servo");
-                    servo_set_us(SERVO_CLOSE_US);
-                    state = ST_IDLE;
-
-                    event_t back = {.id = EVT_ENTER_IDLE};
-                    fsm_post_event(&back);
-                }
-                break;
-
-            case ST_ERROR:
-                // Ahora no hacemos nada con timeout; solo sale cuando se pulsa el botón
-                break;
-
-            default:
-                ESP_LOGW(TAG, "Estado desconocido: %d", state);
+        case ST_INIT:
+            if (e.id == EVT_STARTUP)
+            {
+                servo_set_us(SERVO_CLOSE_US);
                 state = ST_IDLE;
-                break;
+                fsm_post_event(&(event_t){.id = EVT_ENTER_IDLE});
+            }
+            break;
+
+        case ST_IDLE:
+            if (e.id == EVT_ENTER_IDLE)
+            {
+                memset(pin, 0, sizeof(pin));
+                idx = 0;
+                lcd_set_line1("PIN:");
+                state = ST_ENTRADA_PIN;
+            }
+            break;
+
+        case ST_ENTRADA_PIN:
+            if (e.id == EVT_TECLA_DIGITO && idx < PIN_LENGTH)
+            {
+                pin[idx++] = e.tecla;
+                char buf[17];
+                snprintf(buf, 17, "PIN:%s", pin);
+                lcd_set_line1(buf);
+            }
+            else if (e.id == EVT_TECLA_BORRAR && idx > 0)
+            {
+                idx--;
+                pin[idx] = '\0';
+                char buf[17];
+                snprintf(buf, 17, "PIN:%s", pin);
+                lcd_set_line1(buf);
+            }
+            else if (e.id == EVT_TECLA_CONFIRMAR)
+            {
+                lcd_set_line1("Validando...");
+                if (!strcmp(pin, PIN_CORRECTO))
+                {
+                    lcd_set_line1("Abriendo...");
+                    servo_set_us(SERVO_OPEN_US);
+                    xTimerStart(t_servo, 0);
+                    state = ST_ABIERTO;
+                }
+                else
+                {
+                    lcd_set_line1("ERROR");
+                    xTimerStart(t_servo, 0);
+                    state = ST_ERROR;
+                }
+            }
+            break;
+
+        case ST_ABIERTO:
+        case ST_ERROR:
+            if (e.id == EVT_TIMEOUT)
+            {
+                servo_set_us(SERVO_CLOSE_US);
+                state = ST_IDLE;
+                fsm_post_event(&(event_t){.id = EVT_ENTER_IDLE});
+            }
+            break;
         }
     }
 }
 
-
-
-/* ============================ Adaptador Teclado → FSM ============================ */
+/* ============================ TECLADO → FSM ============================ */
 
 static void teclado_event_task(void *arg)
 {
-    char tecla;
-
+    char t;
     for (;;)
     {
-        if (xQueueReceive(cola_teclas, &tecla, portMAX_DELAY))
-        {
-            event_t e = {0};
+        xQueueReceive(cola_teclas, &t, portMAX_DELAY);
+        event_t e = {0};
 
-            if (tecla >= '0' && tecla <= '9')
-                e.id = EVT_TECLA_DIGITO, e.tecla = tecla;
-            else if (tecla == '*')
-                e.id = EVT_TECLA_BORRAR;
-            else if (tecla == '#')
-                e.id = EVT_TECLA_CONFIRMAR;
-            else
-                continue;
+        if (t >= '0' && t <= '9')      e.id = EVT_TECLA_DIGITO, e.tecla = t;
+        else if (t == '#')             e.id = EVT_TECLA_CONFIRMAR;
+        else if (t == '*')             e.id = EVT_TECLA_BORRAR;
+        else continue;
 
-            fsm_post_event(&e);
-        }
+        fsm_post_event(&e);
     }
 }
 
-/* ============================ ISR Panico ============================ */
+/* ============================ LCD TASK ============================ */
+
+static void lcd_task(void *arg)
+{
+    uint8_t h, m, s, d, mo;
+    char l1[17], l2[21];
+
+    xSemaphoreTake(mutex_i2c, portMAX_DELAY);
+    lcd_init();
+    xSemaphoreGive(mutex_i2c);
+
+    for (;;)
+    {
+        ds3231_read(&h, &m, &s, &d, &mo);
+
+        xSemaphoreTake(mutex_lcd, portMAX_DELAY);
+        strcpy(l1, lcd_line1);
+        xSemaphoreGive(mutex_lcd);
+
+        snprintf(l2, 21, "%02d/%02d %02d:%02d:%02d ", d, mo, h, m, s);
+
+        xSemaphoreTake(mutex_i2c, portMAX_DELAY);
+        lcd_cmd(0x80);
+        for (int i = 0; i < 16; i++) lcd_data(l1[i]);
+        lcd_cmd(0xC0);
+        for (int i = 0; i < 16; i++) lcd_data(l2[i]);
+        xSemaphoreGive(mutex_i2c);
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+/* ============================ PANIC ============================ */
+
 static void IRAM_ATTR panic_isr(void *arg)
 {
-    event_t e = {.id = EVT_PANIC_ISR};
-    fsm_post_event_isr(&e);
+    BaseType_t hpw = pdFALSE;
+    xSemaphoreGiveFromISR(sem_panic, &hpw);
+    if (hpw) portYIELD_FROM_ISR();
 }
 
-static void panic_button_init(void)
+static void panic_task(void *arg)
 {
-    gpio_config_t io = {
-        .pin_bit_mask = 1ULL << PANIC_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE 
-    };
-    gpio_config(&io);
-
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PANIC_GPIO, panic_isr, NULL);
-
-    ESP_LOGI(TAG, "Botón de pánico en GPIO %d", PANIC_GPIO);
+    for (;;)
+    {
+        xSemaphoreTake(sem_panic, portMAX_DELAY);
+        fsm_post_event(&(event_t){.id = EVT_PANIC});
+    }
 }
 
-/* ============================ app_main ============================ */
+/* ============================ MAIN ============================ */
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Control de acceso FSM (no bloqueante)");
-    panic_button_init();
+    q_events  = xQueueCreate(FSM_QUEUE_LEN, sizeof(event_t));
+    sem_panic = xSemaphoreCreateBinary();
+    mutex_i2c = xSemaphoreCreateMutex();
+    mutex_lcd = xSemaphoreCreateMutex();
 
     teclado_init();
-    xTaskCreate(tarea_teclado, "kbd_scan", 2048, NULL, Teclado_TASK_PRIO, NULL);
-
-    q_events = xQueueCreate(FSM_QUEUE_LEN, sizeof(event_t));
-    configASSERT(q_events);
-
+    i2c_init();
     servo_init();
-    servo_set_us(SERVO_CLOSE_US);
 
-    t_servo = xTimerCreate(
-        "servo_timer",
-        pdMS_TO_TICKS(SERVO_TIME_MS),
-        pdFALSE,
-        NULL,
-        servo_timeout_cb
-    );
-    configASSERT(t_servo);
+    t_servo = xTimerCreate("servo", pdMS_TO_TICKS(SERVO_TIME_MS),
+                           pdFALSE, NULL, servo_timeout_cb);
 
-    xTaskCreate(fsm_task, "fsm", FSM_TASK_STACK, NULL, FSM_TASK_PRIO, NULL);
-    xTaskCreate(teclado_event_task, "kbd_evt", 2048, NULL, Teclado_Event_TASK_PRIO, NULL);
+    gpio_install_isr_service(0);
+    gpio_set_direction(PANIC_GPIO, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(PANIC_GPIO, GPIO_PULLUP_ONLY);
+    gpio_set_intr_type(PANIC_GPIO, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(PANIC_GPIO, panic_isr, NULL);
 
-    event_t start = {.id = EVT_STARTUP};
-    fsm_post_event(&start);
+    xTaskCreate(tarea_teclado, "kbd_scan", 2048, NULL, TECLADO_TASK_PRIO, NULL);
+    xTaskCreate(teclado_event_task, "kbd_evt", 2048, NULL, TECLADO_EVENT_TASK_PRIO, NULL);
+    xTaskCreate(fsm_task, "fsm", 4096, NULL, FSM_TASK_PRIO, NULL);
+    xTaskCreate(panic_task, "panic", 2048, NULL, PANIC_TASK_PRIO, NULL);
+    xTaskCreate(lcd_task, "lcd", 4096, NULL, LCD_TASK_PRIO, NULL);
+
+    fsm_post_event(&(event_t){.id = EVT_STARTUP});
 }
