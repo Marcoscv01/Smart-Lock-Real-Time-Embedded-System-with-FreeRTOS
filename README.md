@@ -9,6 +9,9 @@ Teclado matriial: Filas : 13, 12, 14, 27; Columnas: 26, 25, 33, 32
 Servo Cerradura: GPIO15, con apertura en 2000 y cierre en 1000
 Boton Panico: GPIO0, el BOOT del ESP, simulando una emergencia que necesite tener la apertura de la cerradura forzada
 
+## Comunicacion i2c
+Los periféricos pantalla LCD y el reloj DS3231 utilizan el protocolo i2c, con las direcciones 0x68 y 0x27. Para proteger el recurso compartido se ha utilizado un mutex. El ESP lee la hora actual y la irá plasmando en el LCD.
+
 ## Teclado.h
 Implementa la lectura de un teclado matricial 4×4 mediante escaneo periódico de filas y columnas usando GPIO.
 Las filas se configuran como salidas y las columnas como entradas con pull-up. La detección de pulsaciones se realiza por nivel bajo, con debounce simple por retardo. Cada tecla detectada se envía a una cola FreeRTOS (cola_teclas).

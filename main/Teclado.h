@@ -89,4 +89,3 @@ static inline void tarea_teclado(void *pvParameters)
     }
 }
 
-
