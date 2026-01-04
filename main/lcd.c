@@ -2,8 +2,6 @@
 #include "rtc.h"
 #include "freertos/task.h"
 #include "driver/i2c.h"
-#include <stdio.h>
-#include <string.h>
 
 #define I2C_PORT     I2C_NUM_0
 #define PCF8574_ADDR 0x27
@@ -70,16 +68,21 @@ void lcd_set_fsm_state(int state, const char *pin)
     xSemaphoreGive(mutex_lcd);
 }
 
-void lcd_task(void *arg)
-{
+//inicializa el LCD, creando mutex interno
+void LCD_init(void){
     mutex_lcd = xSemaphoreCreateMutex();
     lcd_hw_init();
+
+}
+
+//Coge TIEMPO y por I2C lo imprime por el LCD
+void lcd_task(void *arg)
+{
+    
 
     for (;;)
     {
         char l2[17];
-
-        /* ===== LEER RECURSO TIEMPO ===== */
         xSemaphoreTake(mutex_time, portMAX_DELAY);
 
         if (rtc_time.valid) {
@@ -96,15 +99,12 @@ void lcd_task(void *arg)
 
         xSemaphoreGive(mutex_time);
 
-        /* ===== ESCRITURA LCD ===== */
-        xSemaphoreTake(mutex_lcd, portMAX_DELAY);
 
+        xSemaphoreTake(mutex_lcd, portMAX_DELAY);
         lcd_cmd(0x80);
         for (int i = 0; i < 16; i++) lcd_data(lcd_line1[i]);
-
         lcd_cmd(0xC0);
         for (int i = 0; i < 16; i++) lcd_data(l2[i]);
-
         xSemaphoreGive(mutex_lcd);
 
         vTaskDelay(pdMS_TO_TICKS(500));

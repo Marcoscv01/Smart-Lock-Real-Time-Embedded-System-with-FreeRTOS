@@ -6,5 +6,5 @@
 
 void lcd_task(void *arg);
 void lcd_set_fsm_state(int state, const char *pin);
-
+void LCD_init(void);
 #endif
