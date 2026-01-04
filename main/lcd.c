@@ -107,6 +107,6 @@ void lcd_task(void *arg)
 
         xSemaphoreGive(mutex_lcd);
 
-        vTaskDelay(pdMS_TO_TICKS(300));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }

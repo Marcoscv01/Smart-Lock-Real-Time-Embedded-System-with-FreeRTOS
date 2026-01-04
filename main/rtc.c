@@ -38,6 +38,6 @@ void rtc_task(void *arg) {
             xSemaphoreGive(mutex_time);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(200));  // más rápido que 1s, como querías
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
