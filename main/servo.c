@@ -3,9 +3,12 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "servo.h"
+#include "fsm.h"
+#include "freertos/queue.h"
 
-#define SERVO_GPIO       GPIO_NUM_15
+#define SERVO_GPIO  GPIO_NUM_15
 
+extern QueueHandle_t q_fsm_servo;
 
 void servo_init(void) {
     ledc_timer_config_t t = {
@@ -25,8 +28,41 @@ void servo_init(void) {
     ledc_channel_config(&c);
 }
 
-void servo_set_us(uint32_t us) {
+static void servo_set_us(uint32_t us) {
     uint32_t duty = (us * 65535) / 20000;
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
+
+void servo_task(void *arg)
+{
+    fsm_display_t msg;
+    fsm_state_t last_state = -1;
+
+    for (;;) {
+        xQueueReceive(q_fsm_servo, &msg, portMAX_DELAY);
+
+        if (msg.state == last_state)
+            continue;
+
+        last_state = msg.state;
+
+        switch (msg.state) {
+
+            case ST_ABIERTO:
+                servo_set_us(SERVO_OPEN_US);
+                break;
+            case ST_PANIC:
+                servo_set_us(SERVO_OPEN_US);
+                break;
+
+            case ST_IDLE:
+            case ST_ERROR:
+                servo_set_us(SERVO_CLOSE_US);
+                break;
+
+            default: servo_set_us(SERVO_CLOSE_US);
+                break;
+        }
+    }
 }

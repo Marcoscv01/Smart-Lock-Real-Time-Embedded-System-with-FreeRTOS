@@ -28,6 +28,11 @@ typedef struct {
     int64_t timestamp_us;
 } event_t;
 
+typedef struct {
+    fsm_state_t state;
+    char pin[5];
+} fsm_display_t;
+
 void FSM_init(void);
 void Teclado2FSM_task(void *arg);
 void fsm_task(void *arg);

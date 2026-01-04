@@ -1,12 +1,11 @@
 #include "Teclado.h"
-#include "lcd.h"
 #include "servo.h"
 #include "fsm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include <string.h>
 #include "esp_timer.h"
+#include "string.h"
 
 #define PIN_LENGTH       4
 static const char PIN_CORRECTO[PIN_LENGTH+1] = "1234";
@@ -16,6 +15,8 @@ extern QueueHandle_t q_events;
 extern QueueHandle_t cola_teclas;
 extern TimerHandle_t t_servo;
 extern fsm_state_t state;
+extern QueueHandle_t q_fsm_lcd;
+extern QueueHandle_t q_fsm_servo;
 
 //Envia a la cola el siguiente evento del FSM
 static void fsm_post_event(event_t *e) {
@@ -51,6 +52,18 @@ void Teclado2FSM_task(void *arg) {
     }
 }
 
+//Notifica el estado actual 
+static void fsm_notify_display(fsm_state_t st, const char *pin)
+{
+    fsm_display_t msg = {
+        .state = st
+    };
+    strncpy(msg.pin, pin, sizeof(msg.pin)-1);
+    xQueueOverwrite(q_fsm_lcd, &msg);
+    xQueueOverwrite(q_fsm_servo, &msg);
+}
+
+
 //Evento para el PANIC
 void panic_task(void *arg) {
     for (;;) {
@@ -73,20 +86,21 @@ void fsm_task(void *arg) {
         if (e.id == EVT_PANIC) {
             if (state != ST_PANIC) {
                 state = ST_PANIC;
-                servo_set_us(SERVO_OPEN_US);
+                
             } else {
-                servo_set_us(SERVO_CLOSE_US);
+                
                 state = ST_IDLE;
                 fsm_post_event(&(event_t){.id=EVT_ENTER_IDLE});
             }
-            lcd_set_fsm_state(state, pin);
+            fsm_notify_display(state, pin);
+
             continue;
         }
 
         switch (state) {
             case ST_INIT:
                 if (e.id == EVT_STARTUP) {
-                    servo_set_us(SERVO_CLOSE_US);
+                    
                     state = ST_IDLE;
                     fsm_post_event(&(event_t){.id=EVT_ENTER_IDLE});
                 }
@@ -110,7 +124,7 @@ void fsm_task(void *arg) {
                 } else if (e.id == EVT_TECLA_CONFIRMAR) {
                     if (strcmp(pin, PIN_CORRECTO) == 0) {
                         state = ST_ABIERTO;
-                        servo_set_us(SERVO_OPEN_US);
+                        
                         xTimerStart(t_servo, 0);
                     } else {
                         state = ST_ERROR;
@@ -122,7 +136,7 @@ void fsm_task(void *arg) {
             case ST_ABIERTO:
             case ST_ERROR:
                 if (e.id == EVT_TIMEOUT) {
-                    servo_set_us(SERVO_CLOSE_US);
+                    
                     state = ST_IDLE;
                     fsm_post_event(&(event_t){.id=EVT_ENTER_IDLE});
                 }
@@ -132,6 +146,7 @@ void fsm_task(void *arg) {
                 break;
         }
 
-        lcd_set_fsm_state(state, pin);
+        fsm_notify_display(state, pin);
+
     }
 }

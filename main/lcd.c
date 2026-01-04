@@ -2,6 +2,7 @@
 #include "rtc.h"
 #include "freertos/task.h"
 #include "driver/i2c.h"
+#include "fsm.h"
 
 #define I2C_PORT     I2C_NUM_0
 #define PCF8574_ADDR 0x27
@@ -9,6 +10,8 @@
 static SemaphoreHandle_t mutex_lcd;
 static char lcd_line1[17] = "Inicializando";
 static char lcd_line2[17] = "";
+
+extern QueueHandle_t q_fsm_lcd;
 
 /* ===== HW LCD ===== */
 static void lcd_delay(void){ vTaskDelay(pdMS_TO_TICKS(5)); }
@@ -51,23 +54,6 @@ static void lcd_hw_init(void){
     lcd_cmd(0x06);
 }
 
-/* ===== API ===== */
-void lcd_set_fsm_state(int state, const char *pin)
-{
-    xSemaphoreTake(mutex_lcd, portMAX_DELAY);
-
-    switch(state){
-        case 0: snprintf(lcd_line1,17,"Inicializando"); break;
-        case 1: snprintf(lcd_line1,17,"Esperando PIN"); break;
-        case 2: snprintf(lcd_line1,17,"PIN: %-11s", pin); break;
-        case 3: snprintf(lcd_line1,17,"Abriendo..."); break;
-        case 4: snprintf(lcd_line1,17,"!!! PANIC !!!"); break;
-        case 5: snprintf(lcd_line1,17,"ERROR"); break;
-    }
-
-    xSemaphoreGive(mutex_lcd);
-}
-
 //inicializa el LCD, creando mutex interno
 void LCD_init(void){
     mutex_lcd = xSemaphoreCreateMutex();
@@ -98,6 +84,20 @@ void lcd_task(void *arg)
         }
 
         xSemaphoreGive(mutex_time);
+
+        fsm_display_t msg;
+        if (xQueueReceive(q_fsm_lcd, &msg, 0) == pdTRUE) {
+            xSemaphoreTake(mutex_lcd, portMAX_DELAY);
+            switch (msg.state) {
+                case ST_INIT:        snprintf(lcd_line1,17,"Inicializando"); break;
+                case ST_IDLE:        snprintf(lcd_line1,17,"Esperando PIN"); break;
+                case ST_ENTRADA_PIN: snprintf(lcd_line1,17,"PIN: %-11s", msg.pin); break;
+                case ST_ABIERTO:     snprintf(lcd_line1,17,"Abriendo..."); break;
+                case ST_PANIC:       snprintf(lcd_line1,17,"!!! PANIC !!!"); break;
+                case ST_ERROR:       snprintf(lcd_line1,17,"ERROR"); break;
+            }
+            xSemaphoreGive(mutex_lcd);
+        }
 
 
         xSemaphoreTake(mutex_lcd, portMAX_DELAY);

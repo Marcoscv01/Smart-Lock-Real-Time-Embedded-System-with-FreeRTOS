@@ -22,21 +22,28 @@
 #define TECLADO_TASK_PRIO       6
 #define PANIC_TASK_PRIO         7
 #define LCD_TASK_PRIO           3
-#define RTC_TASK_PRIO           4
+#define RTC_TASK_PRIO           3
+#define SERVO_TASK_PRIO         4
+
 
 /* ===== RECURSOS ===== */
 QueueHandle_t cola_teclas;
 QueueHandle_t q_events;
-TimerHandle_t t_servo;
-SemaphoreHandle_t sem_panic;
+QueueHandle_t q_fsm_lcd;
+QueueHandle_t q_fsm_servo;
 
+TimerHandle_t t_servo;
+
+SemaphoreHandle_t sem_panic;
 SemaphoreHandle_t mutex_i2c;
 SemaphoreHandle_t mutex_time;
+
 rtc_time_t rtc_time;
 
 fsm_state_t state;
 
-/* ===== ISR PANIC ===== */
+/* ===== ISR PAN
+IC ===== */
 static void IRAM_ATTR panic_isr(void *arg) {
     BaseType_t hpw = pdFALSE;
     xSemaphoreGiveFromISR(sem_panic, &hpw);
@@ -51,6 +58,10 @@ void app_main(void) {
     mutex_i2c = xSemaphoreCreateMutex();
     mutex_time = xSemaphoreCreateMutex();
     cola_teclas = xQueueCreate(10, sizeof(char));
+    q_fsm_lcd = xQueueCreate(1, sizeof(fsm_display_t));
+    q_fsm_servo = xQueueCreate(1, sizeof(fsm_display_t));
+
+
 
     rtc_time.valid = false;
 
@@ -86,6 +97,5 @@ void app_main(void) {
     xTaskCreate(panic_task, "panic", 2048, NULL, PANIC_TASK_PRIO, NULL);
     xTaskCreate(lcd_task, "lcd", 4096, NULL, LCD_TASK_PRIO, NULL);
     xTaskCreate(rtc_task, "rtc", 2048, NULL, RTC_TASK_PRIO, NULL);
-
-    
+    xTaskCreate(servo_task, "servo", 2048, NULL, SERVO_TASK_PRIO, NULL);
 }

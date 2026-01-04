@@ -6,4 +6,4 @@
 #define SERVO_TIME_MS    3000
 
 void servo_init(void);
-void servo_set_us(uint32_t us);
+void servo_task(void *arg);
