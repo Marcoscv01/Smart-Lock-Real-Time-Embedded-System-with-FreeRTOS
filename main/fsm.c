@@ -17,6 +17,7 @@ extern TimerHandle_t t_servo;
 extern fsm_state_t state;
 extern QueueHandle_t q_fsm_lcd;
 extern QueueHandle_t q_fsm_servo;
+extern QueueHandle_t q_fsm_sd;
 
 //Envia a la cola el siguiente evento del FSM
 static void fsm_post_event(event_t *e) {
@@ -61,6 +62,7 @@ static void fsm_notify_display(fsm_state_t st, const char *pin)
     strncpy(msg.pin, pin, sizeof(msg.pin)-1);
     xQueueOverwrite(q_fsm_lcd, &msg);
     xQueueOverwrite(q_fsm_servo, &msg);
+    xQueueOverwrite(q_fsm_sd, &msg); 
 }
 
 

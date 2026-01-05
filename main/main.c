@@ -3,6 +3,8 @@
 #include "rtc.h"
 #include "servo.h"
 #include "fsm.h"
+#include "sd.h"
+
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,13 +19,14 @@
 
 #define FSM_QUEUE_LEN           10
 //Prioridades tareas
-#define FSM_TASK_PRIO           5
-#define TECLADO_EVENT_TASK_PRIO 4
-#define TECLADO_TASK_PRIO       6
-#define PANIC_TASK_PRIO         7
-#define LCD_TASK_PRIO           3
-#define RTC_TASK_PRIO           3
-#define SERVO_TASK_PRIO         4
+#define PANIC_TASK_PRIO           7   // ISR de seguridad
+#define FSM_TASK_PRIO             6   // Decide toda la logica
+#define SERVO_TASK_PRIO           5   // Actuador físico
+#define TECLADO_EVENT_TASK_PRIO   4   // Traducción eventos del teclado
+#define TECLADO_TASK_PRIO         3   // Escaneo periódico
+#define LCD_TASK_PRIO             2   // Interfaz
+#define RTC_TASK_PRIO             2   // Hora del sistema
+#define SD_TASK_PRIO              1   // Logging
 
 
 /* ===== RECURSOS ===== */
@@ -31,6 +34,8 @@ QueueHandle_t cola_teclas;
 QueueHandle_t q_events;
 QueueHandle_t q_fsm_lcd;
 QueueHandle_t q_fsm_servo;
+QueueHandle_t q_fsm_sd;
+
 
 TimerHandle_t t_servo;
 
@@ -42,13 +47,14 @@ rtc_time_t rtc_time;
 
 fsm_state_t state;
 
-/* ===== ISR PAN
-IC ===== */
+/* ===== ISR PANIC ===== */
 static void IRAM_ATTR panic_isr(void *arg) {
     BaseType_t hpw = pdFALSE;
     xSemaphoreGiveFromISR(sem_panic, &hpw);
     if (hpw) portYIELD_FROM_ISR();
 }
+
+
  
 /* ===== MAIN ===== */
 void app_main(void) {
@@ -60,6 +66,8 @@ void app_main(void) {
     cola_teclas = xQueueCreate(10, sizeof(char));
     q_fsm_lcd = xQueueCreate(1, sizeof(fsm_display_t));
     q_fsm_servo = xQueueCreate(1, sizeof(fsm_display_t));
+    q_fsm_sd = xQueueCreate(1, sizeof(fsm_display_t));
+
 
 
 
@@ -76,6 +84,7 @@ void app_main(void) {
     };
     i2c_param_config(I2C_NUM_0, &i2c_conf);
     i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
+    SPI_init();
 
 // Boton ISR
     gpio_install_isr_service(0);
@@ -98,4 +107,6 @@ void app_main(void) {
     xTaskCreate(lcd_task, "lcd", 4096, NULL, LCD_TASK_PRIO, NULL);
     xTaskCreate(rtc_task, "rtc", 2048, NULL, RTC_TASK_PRIO, NULL);
     xTaskCreate(servo_task, "servo", 2048, NULL, SERVO_TASK_PRIO, NULL);
+    xTaskCreate(sd_task, "sd", 4096, NULL, SD_TASK_PRIO, NULL);
+
 }

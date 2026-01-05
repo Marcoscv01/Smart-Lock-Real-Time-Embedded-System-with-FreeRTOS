@@ -64,6 +64,8 @@ void LCD_init(void){
 //Coge TIEMPO y por I2C lo imprime por el LCD
 void lcd_task(void *arg)
 {
+    TickType_t last_wake = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(500);
     
 
     for (;;)
@@ -107,6 +109,6 @@ void lcd_task(void *arg)
         for (int i = 0; i < 16; i++) lcd_data(l2[i]);
         xSemaphoreGive(mutex_lcd);
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelayUntil(&last_wake, period);
     }
 }

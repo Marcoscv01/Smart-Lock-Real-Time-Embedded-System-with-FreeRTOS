@@ -60,13 +60,15 @@ void teclado_init(void)
 // Tarea de escaneo del teclado
 void Teclado_Scan_task(void *pvParameters)
 {
+    TickType_t last_wake = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(20);
+
     char tecla;
 
-    while (1)
+    for (;;)
     {
         for (int f = 0; f < NUM_FILAS; f++)
         {
-            // Activar fila
             gpio_set_level(filas[f], 0);
 
             for (int c = 0; c < NUM_COLUMNAS; c++)
@@ -76,18 +78,18 @@ void Teclado_Scan_task(void *pvParameters)
                     tecla = mapa_teclas[f][c];
                     xQueueSend(cola_teclas, &tecla, portMAX_DELAY);
 
-                    // Debounce simple por delay
+                    // debounce temporal (NO periódico)
                     vTaskDelay(pdMS_TO_TICKS(200));
 
-                    // Esperar a que se suelte la tecla
                     while (gpio_get_level(columnas[c]) == 0)
                         vTaskDelay(pdMS_TO_TICKS(10));
                 }
             }
 
-            // Desactivar fila
             gpio_set_level(filas[f], 1);
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+
+        vTaskDelayUntil(&last_wake, period);
     }
 }
+
