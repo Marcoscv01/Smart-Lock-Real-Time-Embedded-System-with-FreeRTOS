@@ -28,12 +28,14 @@
 
 #define TAG "SD"
 
+static bool sd_ok = false;
+
 /* ===== EXTERN ===== */
 extern QueueHandle_t q_fsm_sd;
 extern SemaphoreHandle_t mutex_time;
 extern rtc_time_t rtc_time;
 
-/* ===== INIT SD (TU CÓDIGO, intacto) ===== */
+/* ===== INIT SD ===== */
 static void send_dummy_clocks(void)
 {
     gpio_set_level(PIN_CS, 1);
@@ -86,7 +88,7 @@ void SPI_init(void)
     // Configuración host SD
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI2_HOST;
-    host.max_freq_khz = 10; // inicio lento, luego subir
+    host.max_freq_khz = 10; 
 
     // Configuración dispositivo SPI
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -114,6 +116,14 @@ void SPI_init(void)
 
     // Subir frecuencia a 4 MHz después de montar
     host.max_freq_khz = 4000;
+    if (ret != ESP_OK) {
+    sd_ok = false;
+    ESP_LOGE(TAG, "Error montando SD");
+    return;
+}
+
+sd_ok = true;
+
 }
 
 /* ===== LOG ===== */
@@ -139,38 +149,64 @@ static void sd_log_event(const char *event)
     }
 }
 
+
+
+bool sd_is_ok(void)
+{
+    return sd_ok;
+}
+
+
 /* ===== SD TASK ===== */
 void sd_task(void *arg)
 {
     fsm_display_t msg;
     fsm_state_t last_state = ST_INIT;
 
-    for (;;) {
-        xQueueReceive(q_fsm_sd, &msg, portMAX_DELAY);
+    for (;;)
+    {
+        
+        if (xQueueReceive(q_fsm_sd, &msg, pdMS_TO_TICKS(100)) != pdTRUE)
+            continue;
 
-        if (msg.state != last_state) {
-            switch (msg.state) {
-                case ST_ABIERTO:
-                    sd_log_event("Puerta abierta");
-                    break;
+        /* Ignorar estados repetidos */
+        if (msg.state == last_state)
+            continue;
 
-                case ST_ERROR:
-                    sd_log_event("Acceso fallido");
-                    break;
+        /* Medición de latencia FSM → SD */
+        int64_t now = esp_timer_get_time();
+        ESP_LOGI("LAT_SD", "FSM→SD = %lld us", now - msg.timestamp_us);
 
-                case ST_PANIC:
-                    sd_log_event("PANICO ON");
-                    break;
-
-                default:
-                    break;
-            }
-
-            if (last_state == ST_PANIC && msg.state != ST_PANIC) {
-                sd_log_event("PANICO OFF");
-            }
-
+        /* Si la SD no está OK, no intentamos escribir */
+        if (!sd_is_ok()) {
             last_state = msg.state;
+            continue;
         }
+
+        /* Logging de eventos relevantes */
+        switch (msg.state)
+        {
+            case ST_ABIERTO:
+                sd_log_event("Puerta abierta");
+                break;
+
+            case ST_ERROR:
+                sd_log_event("Acceso fallido");
+                break;
+
+            case ST_PANIC:
+                sd_log_event("PANICO ON");
+                break;
+
+            default:
+                break;
+        }
+
+        /* Evento PANICO OFF */
+        if (last_state == ST_PANIC && msg.state != ST_PANIC)
+            sd_log_event("PANICO OFF");
+
+        last_state = msg.state;
     }
 }
+

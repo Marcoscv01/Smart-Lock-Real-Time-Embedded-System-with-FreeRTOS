@@ -5,6 +5,7 @@
 #include "fsm.h"
 #include "sd.h"
 
+#include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,16 +18,18 @@
 /* CONFIG */
 #define PANIC_GPIO       GPIO_NUM_0
 
+
 #define FSM_QUEUE_LEN           10
 //Prioridades tareas
-#define PANIC_TASK_PRIO           7   // ISR de seguridad
-#define FSM_TASK_PRIO             6   // Decide toda la logica
-#define SERVO_TASK_PRIO           5   // Actuador físico
-#define TECLADO_EVENT_TASK_PRIO   4   // Traducción eventos del teclado
-#define TECLADO_TASK_PRIO         3   // Escaneo periódico
-#define LCD_TASK_PRIO             2   // Interfaz
-#define RTC_TASK_PRIO             2   // Hora del sistema
-#define SD_TASK_PRIO              1   // Logging
+#define PANIC_TASK_PRIO           8   // ISR de seguridad
+#define FSM_TASK_PRIO             7   // Decide toda la logica
+#define SERVO_TASK_PRIO           6   // Actuador físico
+#define TECLADO_EVENT_TASK_PRIO   5   // Traducción eventos del teclado
+#define TECLADO_TASK_PRIO         4   // Escaneo periódico
+#define LCD_TASK_PRIO             3   // Interfaz
+#define RTC_TASK_PRIO             3   // Hora del sistema
+#define SD_TASK_PRIO              2   // Logging
+#define MONITOR_TASK_PRIO         1   // Logging
 
 
 /* ===== RECURSOS ===== */
@@ -54,6 +57,32 @@ static void IRAM_ATTR panic_isr(void *arg) {
     if (hpw) portYIELD_FROM_ISR();
 }
 
+ volatile int64_t rtc_jitter_last_us = 0;
+ volatile int64_t rtc_jitter_acc_us  = 0;
+ volatile int64_t rtc_jitter_max_us  = 0;
+ volatile uint32_t rtc_jitter_samples = 0;
+
+void print_cpu_load(void *arg)
+{
+    for (;;) {
+    char buf[512];
+    vTaskGetRunTimeStats(buf);
+    printf("\n=== CPU LOAD ===\n%s\n", buf);
+
+    ESP_LOGI("JITTER_RTC",
+    "last=%lld us | avg=%lld us | max=%lld us",
+    rtc_jitter_last_us,
+    (rtc_jitter_samples ? rtc_jitter_acc_us / rtc_jitter_samples : 0),
+    rtc_jitter_max_us
+);
+
+    
+    
+    vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+
+    
+    }
 
  
 /* ===== MAIN ===== */
@@ -96,8 +125,10 @@ void app_main(void) {
     //Inicializacion de encapsulados
     teclado_init();
     servo_init();
-    LCD_init();
+    
     FSM_init();
+    //vTaskDelay(pdMS_TO_TICKS(500));
+    LCD_init();
 
     //Tareas
     xTaskCreate(Teclado_Scan_task, "kbd_scan", 2048, NULL, TECLADO_TASK_PRIO, NULL);
@@ -105,8 +136,8 @@ void app_main(void) {
     xTaskCreate(fsm_task, "fsm", 4096, NULL, FSM_TASK_PRIO, NULL);
     xTaskCreate(panic_task, "panic", 2048, NULL, PANIC_TASK_PRIO, NULL);
     xTaskCreate(lcd_task, "lcd", 4096, NULL, LCD_TASK_PRIO, NULL);
-    xTaskCreate(rtc_task, "rtc", 2048, NULL, RTC_TASK_PRIO, NULL);
+    xTaskCreate(rtc_task, "rtc", 4096, NULL, RTC_TASK_PRIO, NULL);
     xTaskCreate(servo_task, "servo", 2048, NULL, SERVO_TASK_PRIO, NULL);
     xTaskCreate(sd_task, "sd", 4096, NULL, SD_TASK_PRIO, NULL);
-
+    xTaskCreate(print_cpu_load, "monitor", 4096, NULL, MONITOR_TASK_PRIO, NULL);
 }

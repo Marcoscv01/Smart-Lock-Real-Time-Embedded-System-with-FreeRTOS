@@ -5,6 +5,7 @@
 #include "servo.h"
 #include "fsm.h"
 #include "freertos/queue.h"
+#include "esp_log.h"
 
 #define SERVO_GPIO  GPIO_NUM_15
 
@@ -41,6 +42,8 @@ void servo_task(void *arg)
 
     for (;;) {
         xQueueReceive(q_fsm_servo, &msg, portMAX_DELAY);
+        int64_t now = esp_timer_get_time();
+        ESP_LOGI("LAT_SERVO", "FSM→SERVO = %lld us", now - msg.timestamp_us);
 
         if (msg.state == last_state)
             continue;

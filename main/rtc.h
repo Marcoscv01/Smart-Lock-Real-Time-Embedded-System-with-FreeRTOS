@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+
 typedef struct {
     uint8_t sec;
     uint8_t min;
@@ -18,3 +19,4 @@ extern rtc_time_t rtc_time;
 extern SemaphoreHandle_t mutex_time;
 
 void rtc_task(void *arg);
+

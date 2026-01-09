@@ -3,20 +3,23 @@
 #include "freertos/task.h"
 #include "driver/i2c.h"
 #include "fsm.h"
+#include "esp_log.h"
+
 
 #define I2C_PORT     I2C_NUM_0
 #define PCF8574_ADDR 0x27
 
 static SemaphoreHandle_t mutex_lcd;
 static char lcd_line1[17] = "Inicializando";
-static char lcd_line2[17] = "";
+
 
 extern QueueHandle_t q_fsm_lcd;
-
+extern SemaphoreHandle_t mutex_i2c;
 /* ===== HW LCD ===== */
 static void lcd_delay(void){ vTaskDelay(pdMS_TO_TICKS(5)); }
 
 static void pcf_write(uint8_t d){
+    xSemaphoreTake(mutex_i2c,  pdMS_TO_TICKS(500));
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, PCF8574_ADDR<<1, true);
@@ -24,12 +27,13 @@ static void pcf_write(uint8_t d){
     i2c_master_stop(cmd);
     i2c_master_cmd_begin(I2C_PORT, cmd, pdMS_TO_TICKS(100));
     i2c_cmd_link_delete(cmd);
+    xSemaphoreGive(mutex_i2c);
 }
 
 static void lcd_nibble(uint8_t n, bool rs){
     uint8_t d = (n<<4) | 0x08 | (rs?1:0);
-    pcf_write(d | 0x04); lcd_delay();
-    pcf_write(d & ~0x04); lcd_delay();
+    pcf_write(d | 0x04); //lcd_delay();
+    pcf_write(d & ~0x04);// lcd_delay();
 }
 
 static void lcd_cmd(uint8_t c){
@@ -65,7 +69,6 @@ void LCD_init(void){
 void lcd_task(void *arg)
 {
     TickType_t last_wake = xTaskGetTickCount();
-    const TickType_t period = pdMS_TO_TICKS(500);
     
 
     for (;;)
@@ -89,6 +92,8 @@ void lcd_task(void *arg)
 
         fsm_display_t msg;
         if (xQueueReceive(q_fsm_lcd, &msg, 0) == pdTRUE) {
+            int64_t now = esp_timer_get_time();
+            ESP_LOGI("LAT_LCD", "FSM→LCD = %lld us", now - msg.timestamp_us);
             xSemaphoreTake(mutex_lcd, portMAX_DELAY);
             switch (msg.state) {
                 case ST_INIT:        snprintf(lcd_line1,17,"Inicializando"); break;
@@ -103,12 +108,14 @@ void lcd_task(void *arg)
 
 
         xSemaphoreTake(mutex_lcd, portMAX_DELAY);
+        
         lcd_cmd(0x80);
         for (int i = 0; i < 16; i++) lcd_data(lcd_line1[i]);
         lcd_cmd(0xC0);
         for (int i = 0; i < 16; i++) lcd_data(l2[i]);
+
         xSemaphoreGive(mutex_lcd);
 
-        vTaskDelayUntil(&last_wake, period);
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(500));
     }
 }

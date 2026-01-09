@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "string.h"
+#include "esp_log.h"
 
 #define PIN_LENGTH       4
 static const char PIN_CORRECTO[PIN_LENGTH+1] = "1234";
@@ -54,16 +55,18 @@ void Teclado2FSM_task(void *arg) {
 }
 
 //Notifica el estado actual 
-static void fsm_notify_display(fsm_state_t st, const char *pin)
+static void fsm_notify_display(fsm_state_t st, const char *pin, int64_t ts)
 {
     fsm_display_t msg = {
-        .state = st
+        .state = st,
+        .timestamp_us = ts
     };
     strncpy(msg.pin, pin, sizeof(msg.pin)-1);
     xQueueOverwrite(q_fsm_lcd, &msg);
     xQueueOverwrite(q_fsm_servo, &msg);
-    xQueueOverwrite(q_fsm_sd, &msg); 
+    xQueueOverwrite(q_fsm_sd, &msg);
 }
+
 
 
 //Evento para el PANIC
@@ -94,7 +97,9 @@ void fsm_task(void *arg) {
                 state = ST_IDLE;
                 fsm_post_event(&(event_t){.id=EVT_ENTER_IDLE});
             }
-            fsm_notify_display(state, pin);
+            int64_t t_now = esp_timer_get_time();
+            fsm_notify_display(state, pin, t_now);
+
 
             continue;
         }
@@ -148,7 +153,9 @@ void fsm_task(void *arg) {
                 break;
         }
 
-        fsm_notify_display(state, pin);
+        int64_t t_now = esp_timer_get_time();
+        fsm_notify_display(state, pin, t_now);
+
 
     }
 }

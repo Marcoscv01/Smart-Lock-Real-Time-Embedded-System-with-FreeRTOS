@@ -31,6 +31,7 @@ typedef struct {
 typedef struct {
     fsm_state_t state;
     char pin[5];
+    int64_t timestamp_us;
 } fsm_display_t;
 
 void FSM_init(void);
